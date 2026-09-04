@@ -325,7 +325,6 @@ paintFtfcTransitions = input.bool(true, "Highlight Failing 2 Flips", group = grp
 // Futures-like (futures, forex, commodities): weekend closure (Fri 5PM - Sun 6PM ET) and daily maintenance (5-6PM ET)
 // Crypto: 24/7, only triggers via holiday fallback
 // All others: holiday fallback catches unusual closures
-chartPeriodMs = timeframe.in_seconds(timeframe.period) * 1000
 etHour = hour(timenow, "America/New_York")
 etMinute = minute(timenow, "America/New_York")
 etDOW = dayofweek(timenow, "America/New_York")
@@ -338,8 +337,8 @@ isFuturesLike = syminfo.type == "futures" or syminfo.type == "forex" or syminfo.
 isFuturesWeekendClosed = etDOW == dayofweek.saturday or (etDOW == dayofweek.friday and etHour >= 17) or (etDOW == dayofweek.sunday and etHour < 18)
 isFuturesMaintenance = not isWeekendDay and etDOW != dayofweek.friday and etHour >= 17 and etHour < 18
 isFuturesClosed = isFuturesLike and (isFuturesWeekendClosed or isFuturesMaintenance)
-// Holiday fallback: now is 3x chart period or 4 hours (whichever is larger) past the bar's
-// SCHEDULED CLOSE.
+// Holiday fallback: now is 4 hours past the last bar's SCHEDULED CLOSE (AUTO-SESSION-1 flattened
+// the old max(3 x chart period, 4h)).
 // FIX GLUE-1 (2026-07-06): measure from time_close, not time (the open). CME glues holiday
 // half-sessions into the next trade date (Fri Jul 3 2026 lives inside Mon Jul 6's bar), so
 // the LIVE Monday bar opened with a Thursday-evening stamp and (timenow - time) read ~87h:
@@ -347,9 +346,20 @@ isFuturesClosed = isFuturesLike and (isFuturesWeekendClosed or isFuturesMaintena
 // ("weekly levels on the current day", D/W = "?", phantom PREVIEW MODE banner). A live bar's
 // scheduled close is always in the future, so this can never fire while a session trades;
 // genuinely halted markets still trip it once now exceeds the last scheduled close.
-isHolidayClosed = not na(time_close) and (timenow - time_close) > math.max(chartPeriodMs * 3, 4 * 60 * 60 * 1000)
+// FIX AUTO-SESSION-1 (2026-09-04): two changes, one rule - "closed" means the chart's last bar has
+// passed its scheduled close and no newer bar exists. (a) Veto: Auto never arms while the last bar's
+// time_close is still ahead, whatever the ET clock says. The ET windows above describe US exchanges
+// only: a "stock" on LSE trades 03:00-09:30 ET and an extended-hours chart trades past 16:00, and both
+// had a LIVE daily bar demoted into C1 with a "?" every day - the PREVIEW-WEEKCLOSE-1 symptom, daily.
+// (b) Floor: the holiday fallback is a flat 4h past the last scheduled close. max(3 x chart period, 4h)
+// was 72h on a daily chart, so an exchange holiday (Dec 25 on 1D), a 13:00 early close and a foreign
+// session's afternoon never armed preview before the next open. Trade-off accepted: a thinly traded
+// symbol whose first print lags its scheduled open can show a phantom preview until that print;
+// intraday charts already behaved that way under the 4h floor.
+bool lastBarClosed = not na(time_close) and timenow > time_close
+isHolidayClosed = lastBarClosed and (timenow - time_close) > 4 * 60 * 60 * 1000
 isBarReplay = bar_index < last_bar_index
-marketLikelyClosed = barstate.islast and not isBarReplay and (isStockClosed or isFuturesClosed or isHolidayClosed)
+marketLikelyClosed = barstate.islast and not isBarReplay and lastBarClosed and (isStockClosed or isFuturesClosed or isHolidayClosed)
 previewNextPeriod = previewMode == "On" or (previewMode == "Auto" and marketLikelyClosed)
 // FIX HTF-STRADDLE-1 (T1): a chart bar can straddle a higher-TF boundary (e.g. a weekly bar spanning
 // a mid-week month/quarter roll). request.security maps each chart bar to the HTF bar in effect at the

@@ -22,6 +22,8 @@ How to read this file:
 
 - **W and M open lines stay visible pre-market on slots that were not shifted.** The open line was hidden whenever Auto preview was armed anywhere, not only on the slot whose open is a proxy. The gate is now per slot. (`OPENLINE-PREVIEW-1`)
 
+- **Auto preview never arms while the chart's current bar is still trading, and arms on holidays and early closes.** Auto used hard-coded US Eastern hours for every stock, ETF and index symbol, so a London-listed stock had its live daily bar demoted into C1 with a `?` from 03:00 to 09:30 ET every day, and an extended-hours chart the same from 16:00 to 20:00. The reverse gap: the holiday fallback waited three chart periods past the last scheduled close, 72 hours on a daily chart, so an exchange holiday, a 13:00 early close or a foreign session's afternoon never previewed before the next open. Two changes, one rule: Auto arms only when the last bar's scheduled close (`time_close`) has passed, and the holiday fallback is a flat 4 hours past that close on every chart. Visible side effect: on a weekly chart the PREVIEW MODE banner no longer shows mid-week pre-market, because nothing on that chart can preview until the week closes. Accepted trade-off: a thinly traded symbol whose first print lags the open can show a phantom preview until that print, as intraday charts already did. (`AUTO-SESSION-1`)
+
 ## [3.1.0] — 2026-08-25
 
 Requires TheStratGrammar (TV version 1) to be published before this compiles.
