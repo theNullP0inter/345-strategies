@@ -101,7 +101,7 @@ Three deliberate conservatisms:
 
 ## Rule 6 — Preview mode is the same shift, armed by the market calendar
 
-The market-closed cousin of the straddle: when nothing is trading and a new calendar period has begun, `shouldApplyPreview` applies the identical promotion so traders can plan next period's levels before the open (a weekly slot previews once the served week's scheduled close has passed (Friday after the close through Monday's open), never during Friday's own session; `FIX PREVIEW-WEEKCLOSE-1` replaced the old "Fri/Sat/Sun by calendar" test, which fired all day Friday).
+The market-closed cousin of the straddle: when nothing is trading and a new calendar period has begun, `shouldApplyPreview` applies the identical promotion so traders can plan next period's levels before the open (every calendar slot, W through 12M, previews once the served period's scheduled close has passed, via `shouldStraddle`; `FIX PREVIEW-WEEKCLOSE-1` replaced the weekly "Fri/Sat/Sun by calendar" test that fired all day Friday, and `FIX PREVIEW-CALCLOSE-1` retired the month/quarter/year calendar comparisons that misread session-stamped futures periods during the CME maintenance hour).
 
 Auto-detection is per asset class (`isEquityLike` / `isFuturesLike` / crypto):
 
@@ -110,7 +110,7 @@ Auto-detection is per asset class (`isEquityLike` / `isFuturesLike` / crypto):
 - **Crypto**: 24/7 — only the holiday fallback can trigger it.
 - **Everything**: the holiday fallback — now is `max(3 × chart period, 4h)` past the last bar's scheduled close (`isHolidayClosed`, Rule 4).
 
-All of it is wall-clock logic, so all of it is gated `barstate.islast and not isBarReplay` and never touches history. Preview slots suppress their open line (the open is a proxy), and every preview/straddled slot is excluded from alerts (`slotPreview`, `okA1`–`okA6`) — the period reset re-arms alerting cleanly on the first real bar of the new period.
+All of it is wall-clock logic, so all of it is gated `barstate.islast and not isBarReplay` and never touches history. Preview slots suppress their own open line (the open is a proxy; the gate is per slot, `FIX OPENLINE-PREVIEW-1`), and every preview/straddled slot is excluded from alerts (`slotPreview`, `okA1`–`okA6`), from the Domino chain (`FIX DOMINO-PREVIEW-1`, the synthetic CC always classifies inside) and from Lead anchoring (`FIX LEAD-PREVIEW-1`, an estimate-grade slot must not suppress a real one) — the period reset re-arms alerting cleanly on the first real bar of the new period.
 
 ---
 

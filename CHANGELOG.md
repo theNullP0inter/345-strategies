@@ -14,6 +14,14 @@ How to read this file:
 
 - **The weekly slot no longer shows a yellow `?` during Friday pre-market.** With Preview Mode on Auto, opening a chart on Friday before the bell (SPY 1W, Sep 4 2026 07:51 ET) painted W yellow in the header, demoted the forming week into C1, and reported the week as unknown, even though Monday through Thursday had traded and Friday's session was still to come. `shouldApplyPreview` treated every Friday as part of the weekend by calendar (`differentWeek or Fri/Sat/Sun`), so the moment Auto preview armed for the closed pre-market it projected next week. The weekly test now asks the same question `shouldStraddle` does: has the served week's *scheduled close* (`time_close(tf)`) passed? Friday after the close, the weekend, and Monday before the open all sit past it, so the weekend projection is unchanged; Friday pre-market is not, so the week renders as the in-progress candle it is. Session-aware for free (16:00 ET equities, 17:00 ET futures) and immune to holiday-glued bars whose close is still ahead. Non-weekly slots are untouched. (`PREVIEW-WEEKCLOSE-1`)
 
+- **Monthly, quarterly, semiannual and yearly slots preview by scheduled close too.** Those branches still compared the calendar month and year of the clock against the chart bar's open stamp, which reads a session-stamped futures period (July's bar opens June 30 at 18:00 ET) as the prior month. During the CME maintenance hour on the first trade date of a month, Auto preview demoted the current month into C1 and showed M as `?`. All calendar slots now use `shouldStraddle`. Month-end evenings preview from the close rather than from calendar midnight. (`PREVIEW-CALCLOSE-1`)
+
+- **A preview or straddled slot can no longer become the Lead.** The Lead Signal filter's anchor scan read every enabled slot's result, so a reconstructed monthly slot in force could report `Lead: M` and suppress a real lower slot's lines and alerts, while its own alert was correctly silenced as estimate-grade. Preview slots are skipped when choosing the anchor. (`LEAD-PREVIEW-1`)
+
+- **Preview slots no longer count toward a Domino or fire the Domino alert.** The synthetic placeholder candle always classifies as an inside bar, so every weekend the shifted W and M slots joined the Domino chain, showed a Domino row, and fired the `Domino Setup` alertcondition, the one alert path the preview guards never covered. A preview slot now breaks the chain. (`DOMINO-PREVIEW-1`)
+
+- **W and M open lines stay visible pre-market on slots that were not shifted.** The open line was hidden whenever Auto preview was armed anywhere, not only on the slot whose open is a proxy. The gate is now per slot. (`OPENLINE-PREVIEW-1`)
+
 ## [3.1.0] — 2026-08-25
 
 Requires TheStratGrammar (TV version 1) to be published before this compiles.

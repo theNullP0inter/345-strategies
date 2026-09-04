@@ -1068,53 +1068,23 @@ pkeyCal(int t, string tf) =>
     q = m <= 3 ? 1 : m <= 6 ? 2 : m <= 9 ? 3 : 4
     tf == "12M" ? y : tf == "6M" ? y * 10 + (m <= 6 ? 1 : 2) : tf == "3M" ? y * 10 + q : tf == "W" or tf == "1W" ? y * 1000 + w : y * 100 + m
 
-// Classic preview - UNCHANGED from the pre-straddle version (market-closed / previewMode=On projection).
+// Classic preview (market-closed / previewMode=On projection).
+// FIX PREVIEW-CALCLOSE-1 (2026-09-04): every calendar slot now previews by the rule the weekly branch
+// adopted in PREVIEW-WEEKCLOSE-1 earlier today: the served period's SCHEDULED CLOSE has passed
+// (shouldStraddle). The old M/3M/6M/12M branches compared month()/year() of timenow against the CHART
+// bar's open stamp - the calendar-arithmetic staleness test GLUE-2b retired for straddles. A session-
+// stamped futures period (July's bar opens Jun 30 18:00 ET) parsed as the prior month, so the CME
+// maintenance hour on the first trade date of each month demoted the current month into C1 and showed
+// M as "?". Side effect, intended: month-end evenings preview from the close (16:00 ET equities)
+// instead of waiting for calendar midnight. Daily and intraday slots keep the unconditional branch:
+// once Auto has established the market is closed (AUTO-SESSION-1), their period is over by definition.
 shouldApplyPreview(string tf, bool previewEnabled) =>
     if not previewEnabled
         false
+    else if isCalendarTF(tf)
+        shouldStraddle(tf)
     else
-        // Compare last bar's period vs current calendar period
-        // Calendar TFs (M/3M/6M/12M): Jan 31 -> Feb 1 weekend is a new period even though the served
-        // bar is the old one. Weekly is judged by scheduled close instead (see PREVIEW-WEEKCLOSE-1 below).
-        currentMonth = month(timenow, "America/New_York")
-        currentYear = year(timenow, "America/New_York")
-        currentQuarter = math.ceil(currentMonth / 3)
-        currentSemiAnnual = currentMonth <= 6 ? 1 : 2
-
-        barMonth = month(time, "America/New_York")
-        barYear = year(time, "America/New_York")
-        barQuarter = math.ceil(barMonth / 3)
-        barSemiAnnual = barMonth <= 6 ? 1 : 2
-
-        isWeekly = tf == "W" or tf == "1W"
-        isMonthly = tf == "M" or tf == "1M"
-        isQuarterly = tf == "3M"
-        isSemiAnnual = tf == "6M"
-        isYearly = tf == "12M"
-
-        if isWeekly
-            // FIX PREVIEW-WEEKCLOSE-1 (2026-09-04): the weekly slot previews once the served week's
-            // SCHEDULED CLOSE has passed, not when the calendar says Friday. The old test counted all
-            // of Friday as weekend (differentWeek or Fri/Sat/Sun), so an Auto preview during Friday
-            // pre-market - market closed, but the week still has a session to trade - demoted the
-            // forming week into C1 and showed W as a yellow "?": the GLUE-1 symptom from the other
-            // direction. time_close(tf) is the week's last-session close on the symbol's own calendar
-            // (Fri 16:00 ET equities, Fri 17:00 ET futures), so it is session-aware for free, and a
-            // holiday-glued bar whose close is still ahead can never fire it (GLUE-2b). Friday after
-            // the close, the weekend, and Monday-before-open all sit past that close, so the weekend
-            // projection is unchanged and the week-number comparison is no longer needed. Same rule
-            // as shouldStraddle: staleness is judged against time_close, never the calendar.
-            shouldStraddle(tf)
-        else if isYearly
-            currentYear != barYear
-        else if isSemiAnnual
-            currentSemiAnnual != barSemiAnnual or currentYear != barYear
-        else if isQuarterly
-            currentQuarter != barQuarter or currentYear != barYear
-        else if isMonthly
-            currentMonth != barMonth or currentYear != barYear
-        else
-            true
+        true
 
 applyPreviewShift(int c1Time, float c1H, float c1L, float c1O, float c1C, int ccTime, float ccO, float ccH, float ccL, float ccC, int c2Time, float c2H, float c2L, float c2O, float c2C, float c3H, float c3L, float c4H, float c4L, float exhHP, int exhHT, float exhLP, int exhLT, string tf, bool previewEnabled, bool straddleEnabled) =>
     // FIX HTF-STRADDLE-1: classic preview OR a session-aware live straddle (calendar slot coarser than chart).
@@ -2209,7 +2179,11 @@ for i = 5 to 0
         data = array.get(tfDataArr, i)
         raw = array.get(tfRawArr, i)
         isDebugTF = showDebugPanel and debugTimeframe == cfg.debugLabel
-        result = computeSignalState(data, cfg.tf, raw, cfg.showOpen and not previewNextPeriod and not raw.isPreview, isDebugTF, cfg.tf)  // FIX HTF-STRADDLE-1: no open line for straddled slots (proxy open)
+        // FIX OPENLINE-PREVIEW-1 (2026-09-04): gate the open line per slot only. previewNextPeriod says
+        // the market-wide Auto mechanism is armed, not that THIS slot's open is a proxy; it was hiding
+        // the W and M open lines on unshifted slots every pre-market. HTF-STRADDLE-1's per-slot guard
+        // (raw.isPreview: no open line for a straddled/previewed slot, its open is synthetic) stays.
+        result = computeSignalState(data, cfg.tf, raw, cfg.showOpen and not raw.isPreview, isDebugTF, cfg.tf)
         array.set(tfResults, i, result)
 
 var int anchorIndex = -1
@@ -2220,7 +2194,14 @@ if barstate.islast and enableDirectionalFilter
     anchorDirection := 0
     for i = 5 to 0
         cfg = array.get(tfConfigs, i)
-        if cfg.enabled and anchorIndex == -1
+        rawA = array.get(tfRawArr, i)
+        // FIX LEAD-PREVIEW-1 (2026-09-04): a preview/straddled slot never anchors the Lead. Its CC is
+        // synthetic or estimate-grade - alerts already treat it so (slotPreview) - but the anchor scan
+        // read its result anyway, so a reconstructed M in force became "Lead: M" and suppressed a real
+        // lower slot's lines AND alerts. Reconstructed slots stay excluded: isPreview is the trust
+        // flag; reconOK only governs how the table renders.
+        bool slotPreviewA = not na(rawA) and rawA.isPreview
+        if cfg.enabled and anchorIndex == -1 and not slotPreviewA
             r = array.get(tfResults, i)
             dir = getSignalDirection(r)
             if dir != 0
@@ -2558,7 +2539,13 @@ for i = 5 to 0
     if cfg.enabled
         result = array.get(tfResults, i)
         tfLabel = getTimeframeLabel(cfg.tf)
-        ccIsInside = not na(result) and str.startswith(result.ccType, "1")
+        rawD = array.get(tfRawArr, i)
+        // FIX DOMINO-PREVIEW-1 (2026-09-04): a preview/straddled slot breaks the Domino chain. Its
+        // synthetic CC (open = promoted close, close = midpoint, range = C1's) ALWAYS classifies inside,
+        // so every weekend the shifted W/M slots counted as inside-bar links, showed a Domino row and
+        // fired the Domino alertcondition - the one alert path slotPreview and okA1-okA6 never covered.
+        bool slotPreviewD = not na(rawD) and rawD.isPreview
+        ccIsInside = not na(result) and not slotPreviewD and str.startswith(result.ccType, "1")
         hasBullSetup = not na(result) and result.drawHigh
         hasBearSetup = not na(result) and result.drawLow
         int thisCCTime = not na(result) ? result.ccStartTime : na
