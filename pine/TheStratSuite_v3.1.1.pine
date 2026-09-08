@@ -1,5 +1,5 @@
 //@version=6
-// TheStrat Suite - v3.1.0
+// TheStrat Suite - v3.1.1
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -32,7 +32,7 @@
 //
 // For setup guides and documentation, visit: thestratsuite.com
 
-indicator("TheStrat Suite - v3.1.0", shorttitle = "TheStrat Suite", overlay = true, max_labels_count = 200, max_lines_count = 200, max_boxes_count = 200, max_bars_back = 200)
+indicator("TheStrat Suite - v3.1.1", shorttitle = "TheStrat Suite", overlay = true, max_labels_count = 200, max_lines_count = 200, max_boxes_count = 200, max_bars_back = 200)
 
 // GRAMMAR-LIB-1 (2026-08-18): bar classification, hammers/shooters, and FTFC now come
 // from the TheStratGrammar library - one classifier, spec-tested against the Python
@@ -283,7 +283,8 @@ stopColorMode = input.string("Opposite Signal", "Color Mode", options = ["Opposi
 colorStop = input.color(#FFFFFF, "Custom Color", group = grpStops, tooltip = "Color for stop level lines and labels when Color Mode is set to Custom", active = showStopLevels and stopColorMode == "Custom")  // FIX MOD-3: only relevant when stops on AND Custom color mode
 // -------------------- DISPLAY - PREVIEW MODE --------------------
 grpPreview = "Display - Preview Mode"
-previewMode = input.string("Auto", "Preview Mode", options = ["Off", "On", "Auto"], group = grpPreview, tooltip = "Off: never preview. Must be set to Off for Bar Replay mode. On: always preview next period levels. Auto: activates whenever the market is not actively trading, automatically disabled during bar replay. Stocks/ETFs/Options: before 9:30 AM, after 4 PM ET, and weekends. Futures/Forex/Commodities: weekends and the daily 5-6 PM ET maintenance window. Crypto: only activates during extended outages. Also activates during holidays for all asset types.")
+// FIX AUTO-SESSION-1 (tooltip): states the scheduled-close rule first; the ET windows are the US closed-market schedule, not the whole rule.
+previewMode = input.string("Auto", "Preview Mode", options = ["Off", "On", "Auto"], group = grpPreview, tooltip = "Off: never preview. Must be set to Off for Bar Replay mode. On: always preview next period levels. Auto: previews once the chart's current bar has passed its scheduled close and the market is not trading. It never activates while the current bar is still open: a weekly chart cannot preview until the week closes, an extended-hours chart waits for its 8 PM ET close. Closed-market windows: Stocks/ETFs/Options before 9:30 AM, after 4 PM ET and weekends. Futures/Forex/Commodities: weekends and the 5-6 PM ET maintenance window. Any symbol: 4 hours after its last bar's scheduled close (exchange holidays, early closes, non-US sessions, crypto outages). Automatically disabled during bar replay. Not available on Renko, Kagi, Line Break, Point & Figure or Range charts.")
 
 // -------------------- DISPLAY - DATA TABLE --------------------
 grpTable = "Display - Data Table"
@@ -325,7 +326,6 @@ paintFtfcTransitions = input.bool(true, "Highlight Failing 2 Flips", group = grp
 // Futures-like (futures, forex, commodities): weekend closure (Fri 5PM - Sun 6PM ET) and daily maintenance (5-6PM ET)
 // Crypto: 24/7, only triggers via holiday fallback
 // All others: holiday fallback catches unusual closures
-chartPeriodMs = timeframe.in_seconds(timeframe.period) * 1000
 etHour = hour(timenow, "America/New_York")
 etMinute = minute(timenow, "America/New_York")
 etDOW = dayofweek(timenow, "America/New_York")
@@ -338,8 +338,8 @@ isFuturesLike = syminfo.type == "futures" or syminfo.type == "forex" or syminfo.
 isFuturesWeekendClosed = etDOW == dayofweek.saturday or (etDOW == dayofweek.friday and etHour >= 17) or (etDOW == dayofweek.sunday and etHour < 18)
 isFuturesMaintenance = not isWeekendDay and etDOW != dayofweek.friday and etHour >= 17 and etHour < 18
 isFuturesClosed = isFuturesLike and (isFuturesWeekendClosed or isFuturesMaintenance)
-// Holiday fallback: now is 3x chart period or 4 hours (whichever is larger) past the bar's
-// SCHEDULED CLOSE.
+// Holiday fallback: now is 4 hours past the last bar's SCHEDULED CLOSE (AUTO-SESSION-1 flattened
+// the old max(3 x chart period, 4h)).
 // FIX GLUE-1 (2026-07-06): measure from time_close, not time (the open). CME glues holiday
 // half-sessions into the next trade date (Fri Jul 3 2026 lives inside Mon Jul 6's bar), so
 // the LIVE Monday bar opened with a Thursday-evening stamp and (timenow - time) read ~87h:
@@ -347,9 +347,20 @@ isFuturesClosed = isFuturesLike and (isFuturesWeekendClosed or isFuturesMaintena
 // ("weekly levels on the current day", D/W = "?", phantom PREVIEW MODE banner). A live bar's
 // scheduled close is always in the future, so this can never fire while a session trades;
 // genuinely halted markets still trip it once now exceeds the last scheduled close.
-isHolidayClosed = not na(time_close) and (timenow - time_close) > math.max(chartPeriodMs * 3, 4 * 60 * 60 * 1000)
+// FIX AUTO-SESSION-1 (2026-09-04): two changes, one rule - "closed" means the chart's last bar has
+// passed its scheduled close and no newer bar exists. (a) Veto: Auto never arms while the last bar's
+// time_close is still ahead, whatever the ET clock says. The ET windows above describe US exchanges
+// only: a "stock" on LSE trades 03:00-09:30 ET and an extended-hours chart trades past 16:00, and both
+// had a LIVE daily bar demoted into C1 with a "?" every day - the PREVIEW-WEEKCLOSE-1 symptom, daily.
+// (b) Floor: the holiday fallback is a flat 4h past the last scheduled close. max(3 x chart period, 4h)
+// was 72h on a daily chart, so an exchange holiday (Dec 25 on 1D), a 13:00 early close and a foreign
+// session's afternoon never armed preview before the next open. Trade-off accepted: a thinly traded
+// symbol whose first print lags its scheduled open can show a phantom preview until that print;
+// intraday charts already behaved that way under the 4h floor.
+bool lastBarClosed = not na(time_close) and timenow > time_close
+isHolidayClosed = lastBarClosed and (timenow - time_close) > 4 * 60 * 60 * 1000
 isBarReplay = bar_index < last_bar_index
-marketLikelyClosed = barstate.islast and not isBarReplay and (isStockClosed or isFuturesClosed or isHolidayClosed)
+marketLikelyClosed = barstate.islast and not isBarReplay and lastBarClosed and (isStockClosed or isFuturesClosed or isHolidayClosed)
 previewNextPeriod = previewMode == "On" or (previewMode == "Auto" and marketLikelyClosed)
 // FIX HTF-STRADDLE-1 (T1): a chart bar can straddle a higher-TF boundary (e.g. a weekly bar spanning
 // a mid-week month/quarter roll). request.security maps each chart bar to the HTF bar in effect at the
@@ -1068,46 +1079,30 @@ pkeyCal(int t, string tf) =>
     q = m <= 3 ? 1 : m <= 6 ? 2 : m <= 9 ? 3 : 4
     tf == "12M" ? y : tf == "6M" ? y * 10 + (m <= 6 ? 1 : 2) : tf == "3M" ? y * 10 + q : tf == "W" or tf == "1W" ? y * 1000 + w : y * 100 + m
 
-// Classic preview - UNCHANGED from the pre-straddle version (market-closed / previewMode=On projection).
+// Classic preview (market-closed / previewMode=On projection).
+// FIX PREVIEW-WEEKCLOSE-1 (2026-09-04): the weekly slot previews once the served week's SCHEDULED
+// CLOSE has passed (shouldStraddle: timenow > time_close(tf)), not on Fri/Sat/Sun by calendar. The
+// old test counted all of Friday as weekend, so an Auto preview during Friday pre-market - market
+// closed, but the week still had a session to trade - demoted the forming week into C1 and showed W
+// as a yellow "?". Friday after the close, the weekend and Monday pre-open all sit past the close,
+// so the weekend projection is unchanged. Superseded in form, not in rule, by PREVIEW-CALCLOSE-1
+// below, which applies the same test to every calendar TF; the weekly rule lives on inside it.
+// FIX PREVIEW-CALCLOSE-1 (2026-09-04): every calendar slot now previews by the rule the weekly branch
+// adopted in PREVIEW-WEEKCLOSE-1 above: the served period's SCHEDULED CLOSE has passed
+// (shouldStraddle). The old M/3M/6M/12M branches compared month()/year() of timenow against the CHART
+// bar's open stamp - the calendar-arithmetic staleness test GLUE-2b retired for straddles. A session-
+// stamped futures period (July's bar opens Jun 30 18:00 ET) parsed as the prior month, so the CME
+// maintenance hour on the first trade date of each month demoted the current month into C1 and showed
+// M as "?". Side effect, intended: month-end evenings preview from the close (16:00 ET equities)
+// instead of waiting for calendar midnight. Daily and intraday slots keep the unconditional branch:
+// once Auto has established the market is closed (AUTO-SESSION-1), their period is over by definition.
 shouldApplyPreview(string tf, bool previewEnabled) =>
     if not previewEnabled
         false
+    else if isCalendarTF(tf)
+        shouldStraddle(tf)
     else
-        // Compare last bar's period vs current calendar period
-        // This handles: Friday EOD -> Weekend (same period), but also Jan 31 -> Feb 1 weekend (new period)
-        currentMonth = month(timenow, "America/New_York")
-        currentYear = year(timenow, "America/New_York")
-        currentWeek = weekofyear(timenow, "America/New_York")
-        currentQuarter = math.ceil(currentMonth / 3)
-        currentSemiAnnual = currentMonth <= 6 ? 1 : 2
-
-        barMonth = month(time, "America/New_York")
-        barYear = year(time, "America/New_York")
-        barWeek = weekofyear(time, "America/New_York")
-        barQuarter = math.ceil(barMonth / 3)
-        barSemiAnnual = barMonth <= 6 ? 1 : 2
-
-        isWeekly = tf == "W" or tf == "1W"
-        isMonthly = tf == "M" or tf == "1M"
-        isQuarterly = tf == "3M"
-        isSemiAnnual = tf == "6M"
-        isYearly = tf == "12M"
-
-        if isWeekly
-            differentWeek = currentWeek != barWeek or currentYear != barYear
-            dow = dayofweek(timenow, "America/New_York")
-            isWeekend = dow == dayofweek.friday or dow == dayofweek.saturday or dow == dayofweek.sunday
-            differentWeek or isWeekend
-        else if isYearly
-            currentYear != barYear
-        else if isSemiAnnual
-            currentSemiAnnual != barSemiAnnual or currentYear != barYear
-        else if isQuarterly
-            currentQuarter != barQuarter or currentYear != barYear
-        else if isMonthly
-            currentMonth != barMonth or currentYear != barYear
-        else
-            true
+        true
 
 applyPreviewShift(int c1Time, float c1H, float c1L, float c1O, float c1C, int ccTime, float ccO, float ccH, float ccL, float ccC, int c2Time, float c2H, float c2L, float c2O, float c2C, float c3H, float c3L, float c4H, float c4L, float exhHP, int exhHT, float exhLP, int exhLT, string tf, bool previewEnabled, bool straddleEnabled) =>
     // FIX HTF-STRADDLE-1: classic preview OR a session-aware live straddle (calendar slot coarser than chart).
@@ -1653,7 +1648,17 @@ computeSignalState(data, tf, raw, showOpen, populateDebug, debugTfStr) =>
             retLowStyle := lowStyle
             // Compute phase: populate return values from draw conditions
             periodDuration = timeframe.in_seconds(tf) * 1000
-            lineEndTime = tfCurrTime + periodDuration
+            // FIX LINEEND-CLOSE-1 (2026-09-08): lines and boxes run to the served bar's SCHEDULED CLOSE
+            // when that is later than open + one nominal period. ES's Labor Day bar (Sun 18:00 -> Tue
+            // 17:00 ET, the holiday session glued into Tuesday's trade date) is 47h long, so open + 24h
+            // ended every D line and box at Monday's reopen, a day short of the live candles: "the daily
+            // levels are a day behind." The same shortfall hit 31-day months (in_seconds("M") is a
+            // nominal month) and glued weekly bars. max() keeps the normal-day geometry pixel-identical
+            // (open + period already reaches past the close there) and only extends on long bars.
+            // Preview slots keep open + period: their ccTime is the chart bar and their served close is
+            // the stale period's, so time_close(tf) would shorten the projection instead of extending it.
+            int slotClose = validTimeframe and not isInPreview ? time_close(tf) : na
+            lineEndTime = na(slotClose) ? tfCurrTime + periodDuration : math.max(tfCurrTime + periodDuration, slotClose)
             if drawHigh
                 retHigh := data.prevHigh
                 retHighColor := highColor
@@ -2202,7 +2207,11 @@ for i = 5 to 0
         data = array.get(tfDataArr, i)
         raw = array.get(tfRawArr, i)
         isDebugTF = showDebugPanel and debugTimeframe == cfg.debugLabel
-        result = computeSignalState(data, cfg.tf, raw, cfg.showOpen and not previewNextPeriod and not raw.isPreview, isDebugTF, cfg.tf)  // FIX HTF-STRADDLE-1: no open line for straddled slots (proxy open)
+        // FIX OPENLINE-PREVIEW-1 (2026-09-04): gate the open line per slot only. previewNextPeriod says
+        // the market-wide Auto mechanism is armed, not that THIS slot's open is a proxy; it was hiding
+        // the W and M open lines on unshifted slots every pre-market. HTF-STRADDLE-1's per-slot guard
+        // (raw.isPreview: no open line for a straddled/previewed slot, its open is synthetic) stays.
+        result = computeSignalState(data, cfg.tf, raw, cfg.showOpen and not raw.isPreview, isDebugTF, cfg.tf)
         array.set(tfResults, i, result)
 
 var int anchorIndex = -1
@@ -2213,7 +2222,14 @@ if barstate.islast and enableDirectionalFilter
     anchorDirection := 0
     for i = 5 to 0
         cfg = array.get(tfConfigs, i)
-        if cfg.enabled and anchorIndex == -1
+        rawA = array.get(tfRawArr, i)
+        // FIX LEAD-PREVIEW-1 (2026-09-04): a preview/straddled slot never anchors the Lead. Its CC is
+        // synthetic or estimate-grade - alerts already treat it so (slotPreview) - but the anchor scan
+        // read its result anyway, so a reconstructed M in force became "Lead: M" and suppressed a real
+        // lower slot's lines AND alerts. Reconstructed slots stay excluded: isPreview is the trust
+        // flag; reconOK only governs how the table renders.
+        bool slotPreviewA = not na(rawA) and rawA.isPreview
+        if cfg.enabled and anchorIndex == -1 and not slotPreviewA
             r = array.get(tfResults, i)
             dir = getSignalDirection(r)
             if dir != 0
@@ -2308,7 +2324,9 @@ if barstate.islast
             if not na(r)
                 periodDuration = timeframe.in_seconds(cfg.tf) * 1000
                 raw = array.get(tfRawArr, i)
-                lineEndTime = raw.ccTime + periodDuration
+                // FIX LINEEND-CLOSE-1: same rule as computeSignalState (scheduled close wins on long bars).
+                int slotCloseR = not raw.isPreview ? time_close(cfg.tf) : na
+                lineEndTime = na(slotCloseR) ? raw.ccTime + periodDuration : math.max(raw.ccTime + periodDuration, slotCloseR)
                 renderSignalLevels(data, r, cfg.lineWidth, lineEndTime)
 
 if barstate.islast and showAnyLabels
@@ -2551,7 +2569,13 @@ for i = 5 to 0
     if cfg.enabled
         result = array.get(tfResults, i)
         tfLabel = getTimeframeLabel(cfg.tf)
-        ccIsInside = not na(result) and str.startswith(result.ccType, "1")
+        rawD = array.get(tfRawArr, i)
+        // FIX DOMINO-PREVIEW-1 (2026-09-04): a preview/straddled slot breaks the Domino chain. Its
+        // synthetic CC (open = promoted close, close = midpoint, range = C1's) ALWAYS classifies inside,
+        // so every weekend the shifted W/M slots counted as inside-bar links, showed a Domino row and
+        // fired the Domino alertcondition - the one alert path slotPreview and okA1-okA6 never covered.
+        bool slotPreviewD = not na(rawD) and rawD.isPreview
+        ccIsInside = not na(result) and not slotPreviewD and str.startswith(result.ccType, "1")
         hasBullSetup = not na(result) and result.drawHigh
         hasBearSetup = not na(result) and result.drawLow
         int thisCCTime = not na(result) ? result.ccStartTime : na
