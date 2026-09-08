@@ -283,7 +283,8 @@ stopColorMode = input.string("Opposite Signal", "Color Mode", options = ["Opposi
 colorStop = input.color(#FFFFFF, "Custom Color", group = grpStops, tooltip = "Color for stop level lines and labels when Color Mode is set to Custom", active = showStopLevels and stopColorMode == "Custom")  // FIX MOD-3: only relevant when stops on AND Custom color mode
 // -------------------- DISPLAY - PREVIEW MODE --------------------
 grpPreview = "Display - Preview Mode"
-previewMode = input.string("Auto", "Preview Mode", options = ["Off", "On", "Auto"], group = grpPreview, tooltip = "Off: never preview. Must be set to Off for Bar Replay mode. On: always preview next period levels. Auto: activates whenever the market is not actively trading, automatically disabled during bar replay. Stocks/ETFs/Options: before 9:30 AM, after 4 PM ET, and weekends. Futures/Forex/Commodities: weekends and the daily 5-6 PM ET maintenance window. Crypto: only activates during extended outages. Also activates during holidays for all asset types.")
+// FIX AUTO-SESSION-1 (tooltip): states the scheduled-close rule first; the ET windows are the US closed-market schedule, not the whole rule.
+previewMode = input.string("Auto", "Preview Mode", options = ["Off", "On", "Auto"], group = grpPreview, tooltip = "Off: never preview. Must be set to Off for Bar Replay mode. On: always preview next period levels. Auto: previews once the chart's current bar has passed its scheduled close and the market is not trading. It never activates while the current bar is still open: a weekly chart cannot preview until the week closes, an extended-hours chart waits for its 8 PM ET close. Closed-market windows: Stocks/ETFs/Options before 9:30 AM, after 4 PM ET and weekends. Futures/Forex/Commodities: weekends and the 5-6 PM ET maintenance window. Any symbol: 4 hours after its last bar's scheduled close (exchange holidays, early closes, non-US sessions, crypto outages). Automatically disabled during bar replay. Not available on Renko, Kagi, Line Break, Point & Figure or Range charts.")
 
 // -------------------- DISPLAY - DATA TABLE --------------------
 grpTable = "Display - Data Table"
@@ -1079,8 +1080,15 @@ pkeyCal(int t, string tf) =>
     tf == "12M" ? y : tf == "6M" ? y * 10 + (m <= 6 ? 1 : 2) : tf == "3M" ? y * 10 + q : tf == "W" or tf == "1W" ? y * 1000 + w : y * 100 + m
 
 // Classic preview (market-closed / previewMode=On projection).
+// FIX PREVIEW-WEEKCLOSE-1 (2026-09-04): the weekly slot previews once the served week's SCHEDULED
+// CLOSE has passed (shouldStraddle: timenow > time_close(tf)), not on Fri/Sat/Sun by calendar. The
+// old test counted all of Friday as weekend, so an Auto preview during Friday pre-market - market
+// closed, but the week still had a session to trade - demoted the forming week into C1 and showed W
+// as a yellow "?". Friday after the close, the weekend and Monday pre-open all sit past the close,
+// so the weekend projection is unchanged. Superseded in form, not in rule, by PREVIEW-CALCLOSE-1
+// below, which applies the same test to every calendar TF; the weekly rule lives on inside it.
 // FIX PREVIEW-CALCLOSE-1 (2026-09-04): every calendar slot now previews by the rule the weekly branch
-// adopted in PREVIEW-WEEKCLOSE-1 earlier today: the served period's SCHEDULED CLOSE has passed
+// adopted in PREVIEW-WEEKCLOSE-1 above: the served period's SCHEDULED CLOSE has passed
 // (shouldStraddle). The old M/3M/6M/12M branches compared month()/year() of timenow against the CHART
 // bar's open stamp - the calendar-arithmetic staleness test GLUE-2b retired for straddles. A session-
 // stamped futures period (July's bar opens Jun 30 18:00 ET) parsed as the prior month, so the CME

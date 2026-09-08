@@ -116,7 +116,7 @@ The output is a `ProcessingResult`: prices, colors, draw flags, in-force flags, 
 
 ## Stage 4 — Filter: mutate flags, never draw
 
-The Lead Signal filter (islast only, when enabled) scans slots top-down with `getSignalDirection` (F2 direction resolved explicitly first — `FIX LEAD-F2-TIEBREAK-2`), takes the first in-force slot as the anchor, then walks the *lower* slots and mutates their `ProcessingResult` flags: `suppressHighFlags`/`suppressLowFlags`/`suppressAllFlags`, plus clearing `signalInForceHigh/Low` so the table and Lead row agree with the hidden lines (`FIX P1-g`).
+The Lead Signal filter (islast only, when enabled) scans slots top-down with `getSignalDirection` (F2 direction resolved explicitly first — `FIX LEAD-F2-TIEBREAK-2`), takes the first in-force slot that is not a preview/straddled slot as the anchor (`FIX LEAD-PREVIEW-1`), then walks the *lower* slots and mutates their `ProcessingResult` flags: `suppressHighFlags`/`suppressLowFlags`/`suppressAllFlags`, plus clearing `signalInForceHigh/Low` so the table and Lead row agree with the hidden lines (`FIX P1-g`).
 
 This is the pattern every filter must follow: **filters edit the decision record; only the render phase reads it.** Because lines, labels, the table, and alerts all consume the same flags, one mutation stays consistent across every surface (`../DESIGN_CONSTRAINTS.md` item 3 — flag any path where lines and labels can diverge).
 
