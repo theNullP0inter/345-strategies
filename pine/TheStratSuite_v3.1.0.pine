@@ -1640,7 +1640,17 @@ computeSignalState(data, tf, raw, showOpen, populateDebug, debugTfStr) =>
             retLowStyle := lowStyle
             // Compute phase: populate return values from draw conditions
             periodDuration = timeframe.in_seconds(tf) * 1000
-            lineEndTime = tfCurrTime + periodDuration
+            // FIX LINEEND-CLOSE-1 (2026-09-08): lines and boxes run to the served bar's SCHEDULED CLOSE
+            // when that is later than open + one nominal period. ES's Labor Day bar (Sun 18:00 -> Tue
+            // 17:00 ET, the holiday session glued into Tuesday's trade date) is 47h long, so open + 24h
+            // ended every D line and box at Monday's reopen, a day short of the live candles: "the daily
+            // levels are a day behind." The same shortfall hit 31-day months (in_seconds("M") is a
+            // nominal month) and glued weekly bars. max() keeps the normal-day geometry pixel-identical
+            // (open + period already reaches past the close there) and only extends on long bars.
+            // Preview slots keep open + period: their ccTime is the chart bar and their served close is
+            // the stale period's, so time_close(tf) would shorten the projection instead of extending it.
+            int slotClose = validTimeframe and not isInPreview ? time_close(tf) : na
+            lineEndTime = na(slotClose) ? tfCurrTime + periodDuration : math.max(tfCurrTime + periodDuration, slotClose)
             if drawHigh
                 retHigh := data.prevHigh
                 retHighColor := highColor
@@ -2306,7 +2316,9 @@ if barstate.islast
             if not na(r)
                 periodDuration = timeframe.in_seconds(cfg.tf) * 1000
                 raw = array.get(tfRawArr, i)
-                lineEndTime = raw.ccTime + periodDuration
+                // FIX LINEEND-CLOSE-1: same rule as computeSignalState (scheduled close wins on long bars).
+                int slotCloseR = not raw.isPreview ? time_close(cfg.tf) : na
+                lineEndTime = na(slotCloseR) ? raw.ccTime + periodDuration : math.max(raw.ccTime + periodDuration, slotCloseR)
                 renderSignalLevels(data, r, cfg.lineWidth, lineEndTime)
 
 if barstate.islast and showAnyLabels
