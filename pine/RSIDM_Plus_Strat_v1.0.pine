@@ -1,0 +1,517 @@
+//@version=6
+// RSIDM Plus Strat - v1.0
+//
+// Hybrid RSI Momentum + Price Action Strategy
+// Combines RSI directional momentum (from RSIDM original) with TheStrat bar structure
+// for high-confidence confluence signals.
+//
+// ARCHITECTURE:
+// - RSI Core: Continuous Break, Retracement, Flip, Divergence (original 7 methods)
+// - Strat Structure: Inside bars, Hammers, Shooters, Failed 2s, 2u/2d patterns
+// - Confluence Gate: Only trade when RSI momentum + Strat structure align
+// - Risk Engine: ATR/Percent/Points SL/TP with trailing stop + breakeven
+//
+// LICENSE: MPL-2.0
+// Based on:
+//   - RSIDM original (Arun_K_Bhaskar)
+//   - TheStratGrammar library (SpinTrades)
+
+strategy(
+    title       = 'RSIDM Plus Strat - v1.0',
+    shorttitle  = 'RSI+Strat',
+    overlay     = true,
+    initial_capital = 100000,
+    currency    = currency.NONE,
+    default_qty_type = strategy.percent_of_equity,
+    default_qty_value = 100,
+    pyramiding  = 0,
+    commission_type = strategy.commission.percent,
+    commission_value = 0.03,
+    slippage    = 1,
+    calc_on_every_tick = false,
+    process_orders_on_close = true,
+    max_lines_count = 200,
+    max_labels_count = 100
+)
+
+// ============================================================================
+// IMPORTS
+// ============================================================================
+
+import SpinTrades/TheStratGrammar/1 as sg
+
+// ============================================================================
+// SECTION 1: INPUTS
+// ============================================================================
+
+// -------- 1 · Strategy --------
+grpStrat = "1 · Strategy"
+signalMode = input.string(
+    "Continuous Break",
+    "Signal Method",
+    options = ["Continuous Break", "Continuous Retracement", "Flip Break", "Flip Retracement", "Divergence", "Hidden Divergence"],
+    tooltip = "RSI momentum detection method. See docs for behavior.",
+    group = grpStrat
+)
+tradeLong = input.bool(true, "Long", inline="dir", group=grpStrat)
+tradeShort = input.bool(false, "Short", inline="dir", group=grpStrat)
+
+// -------- 2 · RSI Core --------
+grpRsi = "2 · RSI Core"
+rsiLen = input.int(14, "RSI Length", minval=1, group=grpRsi)
+rsiSrc = input.source(close, "RSI Source", group=grpRsi)
+rsiMaLen = input.int(14, "RSI MA Length", minval=1, group=grpRsi)
+
+// -------- 3 · RSI Bands --------
+grpBands = "3 · RSI Bands (Breakout/Breakdown)"
+bandBreakout = input.float(60, "Bullish band", minval=1, maxval=99, inline="band", group=grpBands)
+bandBreakdown = input.float(40, "Bearish band", minval=1, maxval=99, inline="band", group=grpBands)
+fibLevel = input.float(0.5, "Retracement fib level", step=0.1, minval=0, maxval=1, group=grpBands)
+
+// -------- 4 · Divergence --------
+grpDiv = "4 · Divergence"
+showDivergence = input.bool(true, "Enable Divergence", group=grpDiv)
+pivotLeftLookback = input.int(5, "Pivot lookback left", minval=1, group=grpDiv)
+pivotRightLookback = input.int(5, "Pivot lookback right", minval=1, group=grpDiv)
+divGapMin = input.int(5, "Divergence gap min", minval=1, group=grpDiv)
+divGapMax = input.int(60, "Divergence gap max", minval=1, group=grpDiv)
+
+// -------- 5 · Confluence Filters --------
+grpConf = "5 · Confluence Filters"
+requireHammerShooter = input.bool(false, "Require HAM/SHO", tooltip="Only trade inside reversals if C1 is hammer/shooter", group=grpConf)
+requireStdDeviation = input.bool(false, "High Volatility Gate", tooltip="Only trade on bars with candle range > ATR", group=grpConf)
+
+// -------- 6 · Exit Method --------
+grpExit = "6 · Exit Method"
+exitMode = input.string(
+    "ATR SL/TP",
+    "Exit Mode",
+    options = ["ATR SL/TP", "Percent SL/TP", "Points SL/TP", "Opposite Signal"],
+    group = grpExit
+)
+riskReward = input.float(2.0, "Risk:Reward", minval=0.1, step=0.1, group=grpExit)
+
+// -------- 7 · Exit Levels --------
+grpExitLevels = "7 · Exit Levels"
+exitAtrLen = input.int(14, "ATR length", minval=1, group=grpExitLevels)
+exitAtrMult = input.float(1.5, "ATR SL multiplier", minval=0.1, step=0.1, group=grpExitLevels)
+slPercent = input.float(1.0, "SL %", minval=0.01, step=0.05, group=grpExitLevels)
+ptsStopLoss = input.float(20.0, "PTS stop", minval=0, step=0.5, group=grpExitLevels)
+ptsTarget = input.float(40.0, "PTS target", minval=0, step=0.5, group=grpExitLevels)
+
+// -------- 8 · Stop Management --------
+grpStopMgmt = "8 · Stop Management"
+trailAtr = input.bool(false, "ATR Trailing Stop", group=grpStopMgmt)
+trailAtrMult = input.float(2.0, "Trail x", minval=0.1, step=0.1, group=grpStopMgmt)
+breakeven = input.bool(false, "Move to Breakeven", group=grpStopMgmt)
+breakEvenR = input.float(1.0, "at R", minval=0.1, step=0.1, group=grpStopMgmt)
+
+// -------- 9 · Display --------
+grpDisp = "9 · Display"
+showDebug = input.bool(false, "Show Debug Info", group=grpDisp)
+
+// ============================================================================
+// SECTION 2: CONSTANTS & COLORS
+// ============================================================================
+
+var color COLOR_BULL = color.new(color.green, 0)
+var color COLOR_BEAR = color.new(color.red, 0)
+var color COLOR_NEUTRAL = color.new(color.gray, 50)
+var color COLOR_SIGNAL_H = color.new(color.green, 80)
+var color COLOR_SIGNAL_L = color.new(color.red, 80)
+
+// ============================================================================
+// SECTION 3: TYPES
+// ============================================================================
+
+type RsiState
+    float rsi
+    float rsiMa
+    int lastCrossUpBar
+    int lastCrossDownBar
+
+type StratState
+    string c1Structure
+    string ccStructure
+    bool c1IsInside
+    bool c1IsHammer
+    bool c1IsShooter
+    bool ccIs2u
+    bool ccIs2d
+    bool ccIsInside
+    bool isF2u
+    bool isF2d
+
+type SignalFlags
+    bool continuousBreakLong
+    bool continuousBreakShort
+    bool continuousRetLong
+    bool continuousRetShort
+    bool flipBreakLong
+    bool flipBreakShort
+    bool divergenceBull
+    bool divergenceBear
+
+type ConfluenceSignal
+    bool entryLong
+    bool entryShort
+    string signalName
+    string signalType  // "Inside Rev", "2-2 Rev", "HAM", "F2", etc.
+
+// ============================================================================
+// SECTION 4: RSI CORE CALCULATIONS (Unconditional Hoisting)
+// ============================================================================
+
+// Calculate RSI on every bar (no short-circuit)
+float rsi = ta.rsi(rsiSrc, rsiLen)
+float rsiMa = ta.sma(rsi, rsiMaLen)
+
+// Band crossovers
+bool rsiCrossUpBand = ta.crossover(rsi, bandBreakout)
+bool rsiCrossDownBand = ta.crossunder(rsi, bandBreakdown)
+
+// Divergence: unconditional hoisting
+bool plFound = not na(ta.pivotlow(rsi, pivotLeftLookback, pivotRightLookback))
+bool phFound = not na(ta.pivothigh(rsi, pivotLeftLookback, pivotRightLookback))
+
+float rsiLBR = rsi[pivotRightLookback]
+float lowLBR = low[pivotRightLookback]
+float highLBR = high[pivotRightLookback]
+
+int barsSincePl = ta.barssince(plFound[1])
+int barsSincePh = ta.barssince(phFound[1])
+bool inRangePl = divGapMin <= barsSincePl and barsSincePl <= divGapMax
+bool inRangePh = divGapMin <= barsSincePh and barsSincePh <= divGapMax
+
+float prevPlRsi = ta.valuewhen(plFound, rsiLBR, 1)
+float prevPlLow = ta.valuewhen(plFound, lowLBR, 1)
+float prevPhRsi = ta.valuewhen(phFound, rsiLBR, 1)
+float prevPhHigh = ta.valuewhen(phFound, highLBR, 1)
+
+bool rsiHL = rsiLBR > prevPlRsi and inRangePl
+bool priceLL = lowLBR < prevPlLow
+bool bullDivergence = showDivergence and priceLL and rsiHL and plFound
+
+bool rsiLH = rsiLBR < prevPhRsi and inRangePh
+bool priceHH = highLBR > prevPhHigh
+bool bearDivergence = showDivergence and priceHH and rsiLH and phFound
+
+// ATR for exit calculations
+float atrVal = ta.atr(exitAtrLen)
+
+// ============================================================================
+// SECTION 5: STRAT STRUCTURE DETECTION
+// ============================================================================
+
+// Prior bar metrics
+float c1High = high[1]
+float c1Low = low[1]
+float c1Open = open[1]
+float c1Close = close[1]
+
+float c2High = high[2]
+float c2Low = low[2]
+
+// Current bar metrics
+float ccHigh = high
+float ccLow = low
+float ccOpen = open
+float ccClose = close
+
+// Bar structure classification via TheStratGrammar
+string c1Struct = sg.structureOf(high[2], low[2], c1High, c1Low)
+string ccStruct = sg.structureOf(c1High, c1Low, ccHigh, ccLow)
+
+bool c1IsInside = c1Struct == "1"
+bool c1Is2u = c1Struct == "2u"
+bool c1Is2d = c1Struct == "2d"
+
+bool ccIs2u = ccStruct == "2u"
+bool ccIs2d = ccStruct == "2d"
+bool ccIsInside = ccStruct == "1"
+bool ccIs3 = ccStruct == "3"
+
+// Pattern detection
+bool c1IsHammer = sg.isHammer(c1Open, c1High, c1Low, c1Close, "Broad (Loose)", false)
+bool c1IsShooter = sg.isShooter(c1Open, c1High, c1Low, c1Close, "Broad (Loose)", false)
+
+// Failed 2 detection
+bool ccBrokeHigh = ccHigh > c1High
+bool ccBrokeLow = ccLow < c1Low
+bool ccReclaimedHigh = ccClose <= c1High and ccClose >= c1Low
+bool ccReclaimedLow = ccClose <= c1High and ccClose >= c1Low
+
+bool isF2u = ccBrokeHigh and ccReclaimedHigh and ccClose < ccOpen  // Failed UP breakout (bearish)
+bool isF2d = ccBrokeLow and ccReclaimedLow and ccClose > ccOpen    // Failed DOWN breakout (bullish)
+
+// ============================================================================
+// SECTION 6: RSI SIGNAL DETECTION (7 Original Methods)
+// ============================================================================
+
+// STATE MACHINE for Continuous Break/Retracement
+var int state = 0
+state := nz(state[1]) == 3 or nz(state[1]) == 6 ? 0 : nz(state[1])
+
+// Long Continuous Break (3-stage)
+bool long1 = rsiCrossUpBand and rsi > rsiMa and (state == 0 or (state >= 1 and state <= 2))
+var float long1High = na
+var float long1Rsi = na
+if long1
+    long1High := high
+    long1Rsi := rsi
+    state := 4
+
+bool long2 = rsi < bandBreakout
+if long2 and state == 4
+    state := 5
+
+bool long3 = not na(long1High) and rsi > bandBreakout and rsi > rsiMa and close > long1High and barstate.isconfirmed
+if long3 and state == 5
+    state := 6
+
+bool continuousBreakLong = state == 6
+
+// Short Continuous Break (mirror logic)
+bool short1 = rsiCrossDownBand and rsi < rsiMa and (state == 0 or state >= 4 and state <= 5)
+var float short1Low = na
+var float short1Rsi = na
+if short1
+    short1Low := low
+    short1Rsi := rsi
+    state := 1
+
+bool short2 = rsi > bandBreakdown
+if short2 and state == 1
+    state := 2
+
+bool short3 = not na(short1Low) and rsi < bandBreakdown and rsi < rsiMa and close < short1Low and barstate.isconfirmed
+if short3 and state == 2
+    state := 3
+
+bool continuousBreakShort = state == 3
+
+// Flip Break using exrem pattern
+f_exrem(bool bullCond, bool bearCond) =>
+    var int sig = 0
+    sig := bullCond ? 1 : bearCond ? -1 : sig[1]
+    [sig != sig[1] and sig == 1, sig != sig[1] and sig == -1]
+
+[flipBreakLong, flipBreakShort] = f_exrem(continuousBreakLong, continuousBreakShort)
+
+// Divergence (already computed above)
+bool divergenceLong = bullDivergence
+bool divergenceShort = bearDivergence
+
+// Select active signal
+bool rsiSignalLong = 
+    signalMode == "Continuous Break" ? continuousBreakLong :
+    signalMode == "Flip Break" ? flipBreakLong :
+    signalMode == "Divergence" ? divergenceLong :
+    false
+
+bool rsiSignalShort = 
+    signalMode == "Continuous Break" ? continuousBreakShort :
+    signalMode == "Flip Break" ? flipBreakShort :
+    signalMode == "Divergence" ? divergenceShort :
+    false
+
+// ============================================================================
+// SECTION 7: CONFLUENCE DETECTION (RSI + Strat Structure)
+// ============================================================================
+
+// INSIDE REVERSAL (2d-1-2u or 2u-1-2d) + RSI momentum
+bool insideRevBullish = 
+    c1IsInside and 
+    ccIs2u and 
+    rsiSignalLong
+
+bool insideRevBearish =
+    c1IsInside and
+    ccIs2d and
+    rsiSignalShort
+
+// HAM/SHO FILTER (optional): require C1 conviction
+bool hamFilter = requireHammerShooter ? (c1IsHammer or c1IsShooter) : true
+bool hamConvBull = c1IsHammer and insideRevBullish
+bool hamConvBear = c1IsShooter and insideRevBearish
+
+// 2-2 REVERSAL (direct, no inside pause) + RSI
+bool direct2RevBullish =
+    c1Is2d and
+    ccIs2u and
+    rsiSignalLong
+
+bool direct2RevBearish =
+    c1Is2u and
+    ccIs2d and
+    rsiSignalShort
+
+// FAILED 2 (Range Reclaim) + RSI momentum
+bool failed2Bullish = isF2d and rsiSignalLong   // F2d = failed downside (bullish)
+bool failed2Bearish = isF2u and rsiSignalShort  // F2u = failed upside (bearish)
+
+// Aggregate confluence signals
+bool confluenceLong = 
+    (insideRevBullish or hamConvBull or direct2RevBullish or failed2Bullish) and hamFilter
+
+bool confluenceShort =
+    (insideRevBearish or hamConvBear or direct2RevBearish or failed2Bearish) and hamFilter
+
+// Signal naming for display
+string signalNameLong = 
+    insideRevBullish ? "Inside Rev" :
+    hamConvBull ? "HAM Rev" :
+    direct2RevBullish ? "2-2 Rev" :
+    failed2Bullish ? "F2 Reclaim" :
+    "Unknown"
+
+string signalNameShort = 
+    insideRevBearish ? "Inside Rev" :
+    hamConvBear ? "SHO Rev" :
+    direct2RevBearish ? "2-2 Rev" :
+    failed2Bearish ? "F2 Reclaim" :
+    "Unknown"
+
+// ============================================================================
+// SECTION 8: ENTRY LOGIC
+// ============================================================================
+
+bool afterSquareOff = false  // Can add time-based EOD logic later if needed
+
+bool enterLong = 
+    confluenceLong and 
+    tradeLong and 
+    barstate.isconfirmed and 
+    not afterSquareOff and
+    strategy.position_size <= 0
+
+bool enterShort = 
+    confluenceShort and 
+    tradeShort and 
+    barstate.isconfirmed and 
+    not afterSquareOff and
+    strategy.position_size >= 0
+
+// ============================================================================
+// SECTION 9: EXIT LEVEL CALCULATIONS
+// ============================================================================
+
+var float longSL = na
+var float longTP = na
+var float shortSL = na
+var float shortTP = na
+var float riskAtEntry = na
+
+if enterLong and strategy.position_size <= 0
+    float ref = close
+    float risk = switch exitMode
+        'ATR SL/TP' => atrVal * exitAtrMult
+        'Percent SL/TP' => ref * slPercent / 100.0
+        'Points SL/TP' => ptsStopLoss
+        => float(na)
+    
+    riskAtEntry := risk
+    longSL := na(risk) ? na : ref - risk
+    longTP := na(risk) ? na : 
+        (exitMode == 'Points SL/TP' ? ref + ptsTarget : ref + risk * riskReward)
+
+if enterShort and strategy.position_size >= 0
+    float ref = close
+    float risk = switch exitMode
+        'ATR SL/TP' => atrVal * exitAtrMult
+        'Percent SL/TP' => ref * slPercent / 100.0
+        'Points SL/TP' => ptsStopLoss
+        => float(na)
+    
+    riskAtEntry := risk
+    shortSL := na(risk) ? na : ref + risk
+    shortTP := na(risk) ? na : 
+        (exitMode == 'Points SL/TP' ? ref - ptsTarget : ref - risk * riskReward)
+
+// ============================================================================
+// SECTION 10: ENTRIES & EXITS
+// ============================================================================
+
+// ENTRIES
+if enterLong
+    strategy.entry('Long', strategy.long, comment=signalNameLong)
+
+if enterShort
+    strategy.entry('Short', strategy.short, comment=signalNameShort)
+
+// EXITS: Bracket modes
+if exitMode != 'Opposite Signal'
+    strategy.exit('Long X', from_entry='Long', stop=longSL, limit=longTP, 
+                  comment_loss='SL', comment_profit='TP')
+    strategy.exit('Short X', from_entry='Short', stop=shortSL, limit=shortTP, 
+                  comment_loss='SL', comment_profit='TP')
+
+// EXITS: Opposite Signal mode
+if exitMode == 'Opposite Signal'
+    if strategy.position_size > 0 and rsiSignalShort and barstate.isconfirmed
+        strategy.close('Long', comment='Flip')
+    if strategy.position_size < 0 and rsiSignalLong and barstate.isconfirmed
+        strategy.close('Short', comment='Flip')
+
+// ============================================================================
+// SECTION 11: STOP MANAGEMENT (Trailing + Breakeven)
+// ============================================================================
+
+float avgPrice = strategy.position_avg_price
+bool bracketMode = exitMode != 'Opposite Signal'
+
+if strategy.position_size > 0 and bracketMode
+    // Trailing stop
+    if trailAtr and not na(atrVal)
+        longSL := math.max(nz(longSL, close - atrVal * trailAtrMult), close - atrVal * trailAtrMult)
+    // Breakeven
+    if breakeven and not na(riskAtEntry) and high >= avgPrice + riskAtEntry * breakEvenR
+        longSL := math.max(nz(longSL, avgPrice), avgPrice)
+
+if strategy.position_size < 0 and bracketMode
+    // Trailing stop
+    if trailAtr and not na(atrVal)
+        shortSL := math.min(nz(shortSL, close + atrVal * trailAtrMult), close + atrVal * trailAtrMult)
+    // Breakeven
+    if breakeven and not na(riskAtEntry) and low <= avgPrice - riskAtEntry * breakEvenR
+        shortSL := math.min(nz(shortSL, avgPrice), avgPrice)
+
+// ============================================================================
+// SECTION 12: PLOTTING & ALERTS
+// ============================================================================
+
+// RSI pane
+plot(rsi, "RSI", color.blue, linewidth=2, display=display.pane)
+plot(rsiMa, "RSI MA", color.orange, display=display.pane)
+hline(bandBreakout, "Band Bullish", color.new(color.gray, 50), linestyle=hline.style_dotted)
+hline(bandBreakdown, "Band Bearish", color.new(color.gray, 50), linestyle=hline.style_dotted)
+hline(50, "Mid", color.new(color.gray, 70), linestyle=hline.style_dotted)
+
+// Entry signals (price pane)
+plotshape(enterLong, title="Entry Long", style=shape.triangleup, location=location.belowbar, 
+          color=COLOR_SIGNAL_H, size=size.small, text="L", textcolor=COLOR_SIGNAL_H, force_overlay=true)
+plotshape(enterShort, title="Entry Short", style=shape.triangledown, location=location.abovebar, 
+          color=COLOR_SIGNAL_L, size=size.small, text="S", textcolor=COLOR_SIGNAL_L, force_overlay=true)
+
+// Stop/Target lines
+plot(bracketMode and strategy.position_size > 0 ? longSL : na, title="Long SL", 
+     color=COLOR_BEAR, style=plot.style_linebr, linewidth=1, force_overlay=true)
+plot(bracketMode and strategy.position_size > 0 ? longTP : na, title="Long TP", 
+     color=COLOR_BULL, style=plot.style_linebr, linewidth=1, force_overlay=true)
+plot(bracketMode and strategy.position_size < 0 ? shortSL : na, title="Short SL", 
+     color=COLOR_BEAR, style=plot.style_linebr, linewidth=1, force_overlay=true)
+plot(bracketMode and strategy.position_size < 0 ? shortTP : na, title="Short TP", 
+     color=COLOR_BULL, style=plot.style_linebr, linewidth=1, force_overlay=true)
+
+// Alerts
+alertcondition(enterLong, title="Entry Long", message="RSI+Strat Long: " + signalNameLong + " on {{ticker}}")
+alertcondition(enterShort, title="Entry Short", message="RSI+Strat Short: " + signalNameShort + " on {{ticker}}")
+
+// Debug info (optional)
+if showDebug and barstate.islast
+    label.new(bar_index, high + (high - low) * 0.5,
+        "RSI: " + str.tostring(rsi, "#.##") + "\n" +
+        "C1: " + c1Struct + " C2: " + ccStruct + "\n" +
+        "Ham:" + str.tostring(c1IsHammer) + " Sho:" + str.tostring(c1IsShooter),
+        xloc=xloc.bar_index, yloc=yloc.price, 
+        textcolor=color.white, bgcolor=COLOR_NEUTRAL, text_font_family=font.monospace)
